@@ -1,0 +1,137 @@
+# Body Movement Detection
+
+Webcam-based body movement detection built on Google's MediaPipe Pose
+Landmarker. It tracks up to a handful of people at once, classifies each
+tracked person's HEAD / LEFT ARM / RIGHT ARM / TORSO / LEFT LEG / RIGHT LEG
+(plus each eye) as MOVING, STATIONARY, or UNCERTAIN, and can log a
+per-frame CSV for calibration and offline analysis.
+
+It can optionally be connected live to the wireless
+[myoware-emg-system](../../myoware-emg-system) receiver over USB serial, so
+EMG + joystick data is merged into the same session -- see
+[Connecting to the MyoWare EMG system](#connecting-to-the-myoware-emg-system)
+below.
+
+## Requirements
+
+- Python 3.10+
+- A webcam
+- The MediaPipe Pose Landmarker model file at
+  `models/pose_landmarker_full.task` (download from
+  [Google's model index](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker#models)
+  if it is not already present)
+
+Install the Python dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+`pyserial` is only needed if you plan to use `--serial-port` (see below);
+the app runs fine without any EMG hardware connected.
+
+## Running
+
+```bash
+python main.py
+```
+
+A window opens showing the camera feed (skeleton overlaid, color-coded by
+movement state) next to a live per-region motion plot for whichever person
+is currently "active".
+
+### Controls
+
+| Key | Action |
+| --- | --- |
+| `R` | Start/stop CSV recording |
+| `Tab` | Switch which tracked person is "active" (the one labeled) |
+| `0` | Trial label: NO TRIAL |
+| `1` | Trial label: STILL |
+| `2` | Trial label: RIGHT_ARM |
+| `3` | Trial label: LEFT_ARM |
+| `4` | Trial label: HEAD |
+| `5` | Trial label: RIGHT_LEG |
+| `6` | Trial label: LEFT_LEG |
+| `7` | Trial label: WHOLE_BODY |
+| `8` | Trial label: SITTING_STILL |
+| `9` | Trial label: LYING_STILL |
+| `S` | Trial label: LYING_SIDEWAYS_STILL |
+| `Q` / `Esc` | Exit |
+
+Trial labels are calibration metadata only (written to the CSV) -- they
+never affect movement detection itself.
+
+## Output
+
+While recording (`R`), one row is written per tracked person per frame to
+`data/movement_data_<timestamp>.csv`, including each region's smoothed
+motion score, observability (RELIABLE / PARTIAL / UNRELIABLE), and
+MOVING/STATIONARY/UNCERTAIN state. See the column list in
+`MovementCsvLogger._fieldnames()` in [main.py](main.py) for the exact
+schema, which also includes the EMG columns described next.
+
+## Connecting to the MyoWare EMG system
+
+> For a step-by-step diagram of how data moves from the EMG sensors all
+> the way through to this app's CSV output, see
+> [INTEGRATION_FLOW.md](INTEGRATION_FLOW.md).
+
+Pass the serial port of a running
+[myoware-emg-system receiver](../../myoware-emg-system/receiver) to merge
+its live EMG + joystick stream into this session:
+
+```bash
+python main.py --serial-port COM4
+# Linux/macOS, and/or a non-default baud rate:
+python main.py --serial-port /dev/ttyUSB0 --baud 115200
+```
+
+This does three things:
+
+1. **On-screen status** -- a line at the bottom of the camera view shows
+   whether the serial link is up, plus the most recent batch's RMS
+   activity level per EMG channel and the joystick reading, so you can
+   confirm the connection at a glance.
+2. **Full-fidelity raw log** -- every EMG batch received (~100 Hz) is
+   written, untouched, to `data/emg_raw_<timestamp>.csv`, in the same
+   column layout as `myoware-emg-system/receiver/visualize_csv.py`'s own
+   log, plus a `host_timestamp` column (this PC's wall clock).
+3. **Per-frame merge** -- each recorded row in
+   `data/movement_data_<timestamp>.csv` gets the *most recent* EMG batch
+   as of that video frame: `emg_seq`, `emg_device_timestamp_ms`,
+   `emg_host_timestamp`, `emg1_rms`, `emg2_rms`, `joy_x`, `joy_y`,
+   `joy_btn`. Columns are blank if `--serial-port` was not given, or if no
+   batch has arrived yet.
+
+**Important:** this is a *software-side* merge, accurate to roughly one
+EMG batch (~10 ms) plus USB/OS scheduling jitter -- not a hardware-level
+sync. Use `emg_host_timestamp` (this PC's clock), not
+`emg_device_timestamp_ms` (the ESP32's own boot-relative clock), when
+lining EMG activity up against `timestamp_ms` in the same row.
+
+A serial port can only be opened by one process at a time. Don't run this
+with `--serial-port` at the same time as
+`myoware-emg-system/receiver/visualize_csv.py` against the same port --
+pick one.
+
+If the port can't be opened (wrong name, already in use, ESP32 not
+connected), a warning is printed and the webcam session continues
+normally without EMG data -- it never blocks or crashes the movement
+detector.
+
+## Project layout
+
+- [main.py](main.py) -- the app: pose detection, movement classification,
+  multi-person tracking, CSV logging, and the on-screen UI
+- [emg_stream.py](emg_stream.py) -- optional background serial reader for
+  the myoware-emg-system receiver's CSV stream (see above)
+- `models/` -- the MediaPipe Pose Landmarker model file
+- `data/` -- CSV output (git-ignored; regenerated by running the app)
+
+## Notes
+
+- `body_movement_regions.py` and `movement_detector.py` /
+  `landmark_mapper.py` are earlier, simpler standalone prototypes of the
+  same idea. They are not imported by `main.py` and are not the
+  maintained entry point -- use `main.py`.
